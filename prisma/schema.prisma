@@ -1,0 +1,202 @@
+// ISM File Assignment System — PostgreSQL schema
+// Run `npx prisma migrate dev --name init` to create these tables.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  USER
+}
+
+enum AssignmentStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+}
+
+/// Admin and user accounts (login credentials + role)
+model User {
+  id           Int       @id @default(autoincrement())
+  employeeId   String    @unique
+  firstName    String
+  middleName   String?
+  lastName     String
+  email        String    @unique
+  passwordHash String
+  role         Role      @default(USER)
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  zipUploads         ZipUpload[]   @relation("ZipUploader")
+  assignments        Assignment[]  @relation("AssignedTo")
+  assignmentsCreated Assignment[]  @relation("AssignedBy")
+  submissions        Submission[]
+  activities         ActivityLog[]
+
+  @@index([role])
+}
+
+/// One uploaded ZIP file and where it was stored / extracted
+model ZipUpload {
+  id             Int      @id @default(autoincrement())
+  originalName   String // file name as uploaded by the admin
+  storedName     String // file name on the server
+  zipPath        String // path relative to STORAGE_DIR
+  extractPath    String // folder (relative to STORAGE_DIR) the ZIP was extracted to
+  sizeBytes      BigInt
+  totalFiles     Int
+  uploadedById   Int
+  uploadedByRole Role
+  createdAt      DateTime @default(now())
+
+  uploadedBy   User          @relation("ZipUploader", fields: [uploadedById], references: [id])
+  excelFiles   ExcelFile[]
+  imageFolders ImageFolder[]
+  assignments  Assignment[]
+
+  @@index([createdAt])
+}
+
+/// Excel / CSV files found inside a ZIP
+model ExcelFile {
+  id           Int      @id @default(autoincrement())
+  zipUploadId  Int
+  fileName     String
+  relativePath String // path inside the ZIP
+  storagePath  String // path relative to STORAGE_DIR
+  sizeBytes    Int
+  sheetNames   String[]
+  createdAt    DateTime @default(now())
+
+  zipUpload   ZipUpload         @relation(fields: [zipUploadId], references: [id], onDelete: Cascade)
+  assignments AssignmentExcel[]
+
+  @@index([zipUploadId])
+}
+
+/// A folder inside a ZIP that contains images
+model ImageFolder {
+  id           Int    @id @default(autoincrement())
+  zipUploadId  Int
+  name         String
+  relativePath String
+  imageCount   Int
+
+  zipUpload ZipUpload              @relation(fields: [zipUploadId], references: [id], onDelete: Cascade)
+  images    ImageFile[]
+  ranges    AssignmentImageRange[]
+
+  @@index([zipUploadId])
+}
+
+/// One image; `position` is its 1-based number inside the folder (natural sort order)
+model ImageFile {
+  id           Int    @id @default(autoincrement())
+  folderId     Int
+  position     Int
+  fileName     String
+  relativePath String
+  storagePath  String
+  sizeBytes    Int
+
+  folder ImageFolder @relation(fields: [folderId], references: [id], onDelete: Cascade)
+
+  @@unique([folderId, position])
+}
+
+/// Work given to one user for one working date
+model Assignment {
+  id           Int              @id @default(autoincrement())
+  userId       Int
+  zipUploadId  Int
+  workDate     DateTime         @db.Date
+  status       AssignmentStatus @default(PENDING)
+  adminNotes   String?
+  assignedById Int
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  user        User                   @relation("AssignedTo", fields: [userId], references: [id])
+  assignedBy  User                   @relation("AssignedBy", fields: [assignedById], references: [id])
+  zipUpload   ZipUpload              @relation(fields: [zipUploadId], references: [id], onDelete: Cascade)
+  excelFiles  AssignmentExcel[]
+  imageRanges AssignmentImageRange[]
+  submissions Submission[]
+
+  @@index([workDate])
+  @@index([userId, workDate])
+  @@index([status])
+}
+
+/// Excel files attached to an assignment
+model AssignmentExcel {
+  id           Int @id @default(autoincrement())
+  assignmentId Int
+  excelFileId  Int
+
+  assignment Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  excelFile  ExcelFile  @relation(fields: [excelFileId], references: [id], onDelete: Cascade)
+
+  @@unique([assignmentId, excelFileId])
+}
+
+/// Image range (inclusive) from one folder attached to an assignment, e.g. images 1–10
+model AssignmentImageRange {
+  id            Int @id @default(autoincrement())
+  assignmentId  Int
+  imageFolderId Int
+  startPosition Int
+  endPosition   Int
+
+  assignment  Assignment  @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  imageFolder ImageFolder @relation(fields: [imageFolderId], references: [id], onDelete: Cascade)
+
+  @@index([imageFolderId])
+}
+
+/// Excel file + notes re-uploaded by the user for an assignment
+model Submission {
+  id             Int      @id @default(autoincrement())
+  assignmentId   Int
+  uploadedById   Int
+  uploadedByRole Role
+  originalName   String?
+  storedName     String?
+  storagePath    String?
+  sizeBytes      Int?
+  notes          String?
+  createdAt      DateTime @default(now())
+
+  assignment Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  uploadedBy User       @relation(fields: [uploadedById], references: [id])
+
+  @@index([assignmentId])
+}
+
+/// Permanent history: uploads, assignments, status changes, deletions…
+model ActivityLog {
+  id         Int      @id @default(autoincrement())
+  action     String
+  entityType String
+  entityId   Int?
+  actorId    Int?
+  actorRole  Role?
+  details    Json?
+  createdAt  DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([action])
+}
