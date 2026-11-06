@@ -54,25 +54,49 @@ async function assertUnique({ employeeId, email }, excludeId) {
   }
 }
 
-/** GET /api/admin/users?search=&status=active|inactive|all */
+/**
+ * GET /api/admin/users?search=&status=active|inactive|all[&page=1&limit=20]
+ * Without `limit` every matching user is returned (old behaviour). With `limit` (max 100) the result is
+ * paginated and sorted by name: { users, total, page, limit, pages }.
+ * Search: every word must match the Employee ID, email or any part of the name.
+ */
 router.get('/', async (req, res) => {
   const search = String(req.query.search || '').trim();
   const status = String(req.query.status || 'all');
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 0, 0), 100);
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+
   const where = { role: 'USER' };
   if (status === 'active') where.isActive = true;
   if (status === 'inactive') where.isActive = false;
-  if (search) {
-    where.OR = ['employeeId', 'firstName', 'middleName', 'lastName', 'email'].map((f) => ({
-      [f]: { contains: search, mode: 'insensitive' },
+  const tokens = search.split(/\s+/).filter(Boolean).slice(0, 6);
+  if (tokens.length) {
+    where.AND = tokens.map((t) => ({
+      OR: ['employeeId', 'firstName', 'middleName', 'lastName', 'email'].map((f) => ({
+        [f]: { contains: t, mode: 'insensitive' },
+      })),
     }));
   }
 
-  const users = await prisma.user.findMany({
-    where,
-    orderBy: { createdAt: 'desc' },
-    include: { _count: { select: { assignments: true } } },
-  });
-  res.json({ users: users.map((u) => ({ ...publicUser(u), assignmentCount: u._count.assignments })) });
+  const include = { _count: { select: { assignments: true } } };
+  const shape = (u) => ({ ...publicUser(u), assignmentCount: u._count.assignments });
+
+  if (limit) {
+    const [total, rows] = await prisma.$transaction([
+      prisma.user.count({ where }),
+      prisma.user.findMany({
+        where,
+        orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }, { id: 'asc' }],
+        skip: (page - 1) * limit,
+        take: limit,
+        include,
+      }),
+    ]);
+    return res.json({ users: rows.map(shape), total, page, limit, pages: Math.max(Math.ceil(total / limit), 1) });
+  }
+
+  const users = await prisma.user.findMany({ where, orderBy: { createdAt: 'desc' }, include });
+  return res.json({ users: users.map(shape) });
 });
 
 /** POST /api/admin/users — password is always the default (ism@123) */
