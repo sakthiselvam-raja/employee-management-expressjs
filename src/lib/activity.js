@@ -6,6 +6,7 @@ import { prisma } from './prisma.js';
  */
 export async function logActivity({ action, entityType, entityId = null, actor = null, details = null }, client = prisma) {
   try {
+    /*
     await client.activityLog.create({
       data: {
         action,
@@ -16,7 +17,7 @@ export async function logActivity({ action, entityType, entityId = null, actor =
         // round-trip through JSON so Dates/BigInts become plain JSON values
         details: details ? JSON.parse(JSON.stringify(details)) : undefined,
       },
-    });
+    });*/
   } catch (err) {
     console.error('[activity] failed to log', action, err.message);
   }

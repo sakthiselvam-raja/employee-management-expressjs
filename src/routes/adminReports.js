@@ -1,8 +1,11 @@
 import { Router } from 'express';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { prisma } from '../lib/prisma.js';
 import { badRequest } from '../lib/errors.js';
 import { fullName, parseWorkDate, publicUser } from '../lib/activity.js';
 import { serializeSubmission } from '../lib/assignments.js';
+import { dirs } from '../lib/storage.js';
 
 const router = Router();
 
@@ -55,6 +58,57 @@ router.get('/dashboard', async (req, res) => {
     page,
     pageSize,
   });
+});
+
+/** Real size of a folder on disk: { bytes, count } (recursive, symlinks are ignored). */
+async function folderSize(dir) {
+  let bytes = 0;
+  let count = 0;
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return { bytes, count };
+  }
+  const BATCH = 200;
+  for (let i = 0; i < entries.length; i += BATCH) {
+    // eslint-disable-next-line no-await-in-loop
+    const parts = await Promise.all(entries.slice(i, i + BATCH).map(async (e) => {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) return folderSize(full);
+      if (!e.isFile()) return { bytes: 0, count: 0 };
+      try {
+        const st = await fs.stat(full);
+        return { bytes: st.size, count: 1 };
+      } catch {
+        return { bytes: 0, count: 0 };
+      }
+    }));
+    parts.forEach((r) => { bytes += r.bytes; count += r.count; });
+  }
+  return { bytes, count };
+}
+
+/**
+ * GET /api/admin/dashboard/storage
+ * Space used by the uploaded ZIP files and by everything extracted from them (measured on disk),
+ * plus the size of the PostgreSQL database.
+ */
+router.get('/dashboard/storage', async (_req, res) => {
+  const [zips, extracted] = await Promise.all([folderSize(dirs.zips), folderSize(dirs.extracted)]);
+  const files = { zips, extracted };
+  const totalBytes = zips.bytes + extracted.bytes;
+
+  // PostgreSQL database size
+  let database = null;
+  try {
+    const [size] = await prisma.$queryRaw`SELECT pg_database_size(current_database()) AS bytes, current_database() AS name`;
+    database = { name: size.name, bytes: Number(size.bytes) };
+  } catch {
+    database = null;
+  }
+
+  res.json({ files, totalBytes, database });
 });
 
 /** GET /api/admin/dashboard/submissions?page=1&pageSize=8 — latest user uploads, paginated */
