@@ -46,7 +46,9 @@ async function loadAssignment(id) {
 
 /**
  * GET /api/admin/assignments
- * Filters: date=YYYY-MM-DD | from & to, status, userId, zipUploadId
+ * Filters: date=YYYY-MM-DD | from & to, status, userId, zipUploadId, search (user name / employee ID / email)
+ * Pagination (optional): page & pageSize (5-100) -> { assignments, total, page, pageSize, pages, counts }
+ * Without pageSize the old behaviour is kept (up to 2000 rows).
  */
 router.get('/', async (req, res) => {
   const where = {};
@@ -61,17 +63,39 @@ router.get('/', async (req, res) => {
     if (from) where.workDate.gte = parseWorkDate(from) ?? undefined;
     if (to) where.workDate.lte = parseWorkDate(to) ?? undefined;
   }
-  if (status && STATUSES.includes(status)) where.status = status;
   if (userId) where.userId = toId(userId, 'userId');
   if (zipUploadId) where.zipUploadId = toId(zipUploadId, 'zipUploadId');
 
-  const assignments = await prisma.assignment.findMany({
-    where,
-    include: assignmentInclude,
-    orderBy: [{ workDate: 'desc' }, { createdAt: 'desc' }],
-    take: 2000,
-  });
-  res.json({ assignments: assignments.map(serializeAssignment) });
+  const tokens = String(req.query.search || '').trim().split(/\s+/).filter(Boolean).slice(0, 6);
+  if (tokens.length) {
+    where.user = {
+      AND: tokens.map((t) => ({
+        OR: ['employeeId', 'firstName', 'middleName', 'lastName', 'email'].map((f) => ({ [f]: { contains: t, mode: 'insensitive' } })),
+      })),
+    };
+  }
+
+  const whereNoStatus = { ...where }; // status counts ignore the status filter itself
+  if (status && STATUSES.includes(status)) where.status = status;
+  const orderBy = [{ workDate: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }];
+
+  if (req.query.pageSize) {
+    const pageSize = Math.min(100, Math.max(5, Number(req.query.pageSize) || 20));
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const [total, rows, grouped] = await Promise.all([
+      prisma.assignment.count({ where }),
+      prisma.assignment.findMany({ where, include: assignmentInclude, orderBy, skip: (page - 1) * pageSize, take: pageSize }),
+      prisma.assignment.groupBy({ by: ['status'], where: whereNoStatus, _count: { _all: true } }),
+    ]);
+    const counts = { PENDING: 0, PROCESSING: 0, COMPLETED: 0 };
+    grouped.forEach((g) => { counts[g.status] = g._count._all; });
+    return res.json({
+      assignments: rows.map(serializeAssignment), total, page, pageSize, pages: Math.max(Math.ceil(total / pageSize), 1), counts,
+    });
+  }
+
+  const assignments = await prisma.assignment.findMany({ where, include: assignmentInclude, orderBy, take: 2000 });
+  return res.json({ assignments: assignments.map(serializeAssignment) });
 });
 
 router.get('/:id', async (req, res) => {

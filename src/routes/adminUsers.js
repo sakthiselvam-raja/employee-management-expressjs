@@ -86,7 +86,9 @@ router.get('/', async (req, res) => {
       prisma.user.count({ where }),
       prisma.user.findMany({
         where,
-        orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }, { id: 'asc' }],
+        orderBy: req.query.sort === 'recent'
+          ? [{ createdAt: 'desc' }, { id: 'desc' }]
+          : [{ firstName: 'asc' }, { lastName: 'asc' }, { id: 'asc' }],
         skip: (page - 1) * limit,
         take: limit,
         include,

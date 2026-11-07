@@ -12,23 +12,20 @@ const pageParams = (q) => {
   return { page, pageSize, skip: (page - 1) * pageSize };
 };
 
-/** GET /api/admin/dashboard?date=YYYY-MM-DD */
+/** GET /api/admin/dashboard?date=YYYY-MM-DD&page=1&pageSize=15&search= — "Progress by user" is paginated */
 router.get('/dashboard', async (req, res) => {
   const date = parseWorkDate(req.query.date || new Date().toISOString().slice(0, 10));
   if (!date) throw badRequest('Invalid date');
+  const { page, pageSize, skip } = pageParams(req.query);
+  const searchTokens = String(req.query.search || '').toLowerCase().split(/\s+/).filter(Boolean);
 
-  const [activeUsers, totalUsers, uploads, dayAssignments, recentSubmissions] = await Promise.all([
+  const [activeUsers, totalUsers, uploads, dayAssignments] = await Promise.all([
     prisma.user.count({ where: { role: 'USER', isActive: true } }),
     prisma.user.count({ where: { role: 'USER' } }),
     prisma.zipUpload.count(),
     prisma.assignment.findMany({
       where: { workDate: date },
       include: { user: true, imageRanges: true, _count: { select: { excelFiles: true, submissions: true } } },
-    }),
-    prisma.submission.findMany({
-      take: 8,
-      orderBy: { createdAt: 'desc' },
-      include: { uploadedBy: true, assignment: { select: { id: true, workDate: true, zipUpload: { select: { originalName: true } } } } },
     }),
   ]);
 
@@ -46,15 +43,41 @@ router.get('/dashboard', async (req, res) => {
     p.excel += a._count.excelFiles;
   }
 
+  const allUsers = [...perUser.values()]
+    .filter((p) => !searchTokens.length || searchTokens.every((t) => `${p.user.fullName} ${p.user.employeeId} ${p.user.email}`.toLowerCase().includes(t)))
+    .sort((a, b) => a.user.fullName.localeCompare(b.user.fullName));
+
   res.json({
     date: req.query.date,
     stats: { activeUsers, totalUsers, uploads, assignments: dayAssignments.length, ...byStatus },
-    perUser: [...perUser.values()].sort((a, b) => a.user.fullName.localeCompare(b.user.fullName)),
-    recentSubmissions: recentSubmissions.map((s) => ({
+    perUser: allUsers.slice(skip, skip + pageSize),
+    perUserTotal: allUsers.length,
+    page,
+    pageSize,
+  });
+});
+
+/** GET /api/admin/dashboard/submissions?page=1&pageSize=8 — latest user uploads, paginated */
+router.get('/dashboard/submissions', async (req, res) => {
+  const { page, pageSize, skip } = pageParams(req.query);
+  const [rows, total] = await Promise.all([
+    prisma.submission.findMany({
+      skip,
+      take: pageSize,
+      orderBy: { createdAt: 'desc' },
+      include: { uploadedBy: true, assignment: { select: { id: true, workDate: true, zipUpload: { select: { originalName: true } } } } },
+    }),
+    prisma.submission.count(),
+  ]);
+  res.json({
+    rows: rows.map((s) => ({
       ...serializeSubmission(s),
       zipName: s.assignment.zipUpload.originalName,
       workDate: s.assignment.workDate.toISOString().slice(0, 10),
     })),
+    total,
+    page,
+    pageSize,
   });
 });
 
