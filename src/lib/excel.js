@@ -27,8 +27,8 @@ function sheetToRows(worksheet, maxRows) {
 }
 
 /** Returns { sheets: [{ name, rows: string[][], truncated }] } or { unsupported: reason } */
-export async function previewSpreadsheet(absPath, maxRows = 200) {
-  const ext = extOf(absPath);
+export async function previewSpreadsheet(absPath, maxRows = 200, extOverride) {
+  const ext = extOverride || extOf(absPath);
   const { size } = await fs.stat(absPath);
   if (size > MAX_PREVIEW_BYTES) return { unsupported: 'File is too large to preview — please download it.' };
   if (ext === '.xls') return { unsupported: 'Preview is not available for old .xls files — please download it.' };

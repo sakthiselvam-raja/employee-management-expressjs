@@ -229,6 +229,48 @@ router.post('/assignments/:id/submissions', submissionUpload.single('file'), asy
   });
 });
 
+/** POST /api/user/preview-file (multipart "file") — preview of a file the user just chose, nothing is stored */
+router.post('/preview-file', submissionUpload.single('file'), async (req, res) => {
+  if (!req.file) throw badRequest('Choose a file to preview');
+  try {
+    const originalName = fixOriginalName(req.file.originalname);
+    const ext = path.extname(originalName).toLowerCase();
+    res.json({ fileName: originalName, ...(await previewSpreadsheet(req.file.path, 2000, ext)) });
+  } finally {
+    await removePath(req.file.path);
+  }
+});
+
+router.get('/submissions/:id/preview', async (req, res) => {
+  const s = await prisma.submission.findUnique({
+    where: { id: toId(req.params.id) },
+    include: { assignment: { select: { userId: true } } },
+  });
+  if (!s || !s.storagePath) throw notFound('File not found');
+  if (s.assignment.userId !== req.user.id) throw forbidden();
+  res.json({ fileName: s.originalName, ...(await previewSpreadsheet(await assertFileExists(s.storagePath))) });
+});
+
+/** DELETE /api/user/submissions/:id — a user can remove their own submission (file + notes) */
+router.delete('/submissions/:id', async (req, res) => {
+  const s = await prisma.submission.findUnique({
+    where: { id: toId(req.params.id) },
+    include: { assignment: { select: { id: true, userId: true } } },
+  });
+  if (!s) throw notFound('Submission not found');
+  if (s.assignment.userId !== req.user.id || s.uploadedById !== req.user.id) throw forbidden('You can only delete your own submissions');
+
+  await prisma.submission.delete({ where: { id: s.id } });
+  if (s.storagePath) {
+    try { await removePath(await assertFileExists(s.storagePath)); } catch { /* file already gone */ }
+  }
+  await logActivity({
+    action: 'SUBMISSION_DELETED', entityType: 'Assignment', entityId: s.assignment.id, actor: req.user,
+    details: { submissionId: s.id, file: s.originalName || null, hadNotes: Boolean(s.notes) },
+  });
+  res.json({ ok: true });
+});
+
 router.get('/submissions/:id/download', async (req, res) => {
   const s = await prisma.submission.findUnique({
     where: { id: toId(req.params.id) },
