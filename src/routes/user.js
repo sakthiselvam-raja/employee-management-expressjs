@@ -120,12 +120,22 @@ function findRange(a, rangeId) {
 router.get('/assignments/:id/ranges/:rangeId/images', async (req, res) => {
   const a = await loadOwnAssignment(req);
   const r = findRange(a, toId(req.params.rangeId));
-  const images = await prisma.imageFile.findMany({
-    where: { folderId: r.imageFolderId, position: { gte: r.startPosition, lte: r.endPosition } },
-    orderBy: { position: 'asc' },
-    select: { id: true, position: true, fileName: true, sizeBytes: true },
-  });
-  res.json({ range: { id: r.id, folderName: r.imageFolder.name, startPosition: r.startPosition, endPosition: r.endPosition }, images });
+  const where = { folderId: r.imageFolderId, position: { gte: r.startPosition, lte: r.endPosition } };
+  const select = { id: true, position: true, fileName: true, sizeBytes: true };
+  const range = { id: r.id, folderName: r.imageFolder.name, startPosition: r.startPosition, endPosition: r.endPosition };
+
+  // optional pagination: ?page=1&pageSize=24 (pageSize 5-100); without pageSize every image is returned
+  if (req.query.pageSize) {
+    const pageSize = Math.min(100, Math.max(5, Number(req.query.pageSize) || 24));
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const [total, images] = await Promise.all([
+      prisma.imageFile.count({ where }),
+      prisma.imageFile.findMany({ where, orderBy: { position: 'asc' }, select, skip: (page - 1) * pageSize, take: pageSize }),
+    ]);
+    return res.json({ range, images, total, page, pageSize });
+  }
+  const images = await prisma.imageFile.findMany({ where, orderBy: { position: 'asc' }, select });
+  return res.json({ range, images });
 });
 
 router.get('/assignments/:id/images/:imageId', async (req, res) => {

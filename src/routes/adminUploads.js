@@ -183,8 +183,6 @@ router.get('/:id', async (req, res) => {
     workDate: formatWorkDate(a.workDate),
     status: a.status,
     userId: a.userId,
-    userName: fullName(a.user),
-    employeeId: a.user.employeeId,
   });
 
   res.json({
@@ -317,12 +315,21 @@ adminFilesRouter.get('/folders/:id/images', async (req, res) => {
   const to = Number(req.query.to) || Number.MAX_SAFE_INTEGER;
   const folder = await prisma.imageFolder.findUnique({ where: { id: folderId } });
   if (!folder) throw notFound('Folder not found');
-  const images = await prisma.imageFile.findMany({
-    where: { folderId, position: { gte: from, lte: to } },
-    orderBy: { position: 'asc' },
-    select: { id: true, position: true, fileName: true, sizeBytes: true },
-  });
-  res.json({ folder, images });
+  const where = { folderId, position: { gte: from, lte: to } };
+  const select = { id: true, position: true, fileName: true, sizeBytes: true };
+
+  // optional pagination: ?page=1&pageSize=24 (pageSize 5-100); without pageSize every image is returned
+  if (req.query.pageSize) {
+    const pageSize = Math.min(100, Math.max(5, Number(req.query.pageSize) || 24));
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const [total, images] = await Promise.all([
+      prisma.imageFile.count({ where }),
+      prisma.imageFile.findMany({ where, orderBy: { position: 'asc' }, select, skip: (page - 1) * pageSize, take: pageSize }),
+    ]);
+    return res.json({ folder, images, total, page, pageSize });
+  }
+  const images = await prisma.imageFile.findMany({ where, orderBy: { position: 'asc' }, select });
+  return res.json({ folder, images });
 });
 
 adminFilesRouter.get('/images/:id', async (req, res) => {
