@@ -101,12 +101,21 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   const id = toId(req.params.id);
   const a = await loadAssignment(id);
-  const submissions = await prisma.submission.findMany({
-    where: { assignmentId: id },
-    include: { uploadedBy: true },
-    orderBy: { createdAt: 'desc' },
-  });
-  res.json({ assignment: serializeAssignment(a), submissions: submissions.map(serializeSubmission) });
+  const where = { assignmentId: id };
+  const orderBy = { createdAt: 'desc' };
+
+  // optional: ?subPage=1&subPageSize=5 paginates the user submissions (without subPageSize all are returned)
+  if (req.query.subPageSize) {
+    const subPageSize = Math.min(50, Math.max(5, Number(req.query.subPageSize) || 5));
+    const subPage = Math.max(1, Number(req.query.subPage) || 1);
+    const [submissionTotal, rows] = await Promise.all([
+      prisma.submission.count({ where }),
+      prisma.submission.findMany({ where, include: { uploadedBy: true }, orderBy, skip: (subPage - 1) * subPageSize, take: subPageSize }),
+    ]);
+    return res.json({ assignment: serializeAssignment(a), submissions: rows.map(serializeSubmission), submissionTotal, subPage, subPageSize });
+  }
+  const submissions = await prisma.submission.findMany({ where, include: { uploadedBy: true }, orderBy });
+  return res.json({ assignment: serializeAssignment(a), submissions: submissions.map(serializeSubmission) });
 });
 
 /** POST /api/admin/assignments */
