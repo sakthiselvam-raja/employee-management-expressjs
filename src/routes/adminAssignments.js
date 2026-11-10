@@ -1,8 +1,9 @@
 import { Router } from 'express';
+import ExcelJS from 'exceljs';
 import path from 'node:path';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
-import { badRequest, notFound, toId } from '../lib/errors.js';
+import { badRequest, conflict, notFound, toId } from '../lib/errors.js';
 import { dirs, removePath, safeFileName } from '../lib/storage.js';
 import { logActivity, parseWorkDate, fullName, formatWorkDate } from '../lib/activity.js';
 import {
@@ -50,9 +51,10 @@ async function loadAssignment(id) {
  * Pagination (optional): page & pageSize (5-100) -> { assignments, total, page, pageSize, pages, counts }
  * Without pageSize the old behaviour is kept (up to 2000 rows).
  */
-router.get('/', async (req, res) => {
+/** Shared filter builder for the list and the Excel export */
+function buildWhere(query) {
   const where = {};
-  const { date, from, to, status, userId, zipUploadId } = req.query;
+  const { date, from, to, status, userId, zipUploadId } = query;
 
   if (date) {
     const d = parseWorkDate(date);
@@ -66,7 +68,7 @@ router.get('/', async (req, res) => {
   if (userId) where.userId = toId(userId, 'userId');
   if (zipUploadId) where.zipUploadId = toId(zipUploadId, 'zipUploadId');
 
-  const tokens = String(req.query.search || '').trim().split(/\s+/).filter(Boolean).slice(0, 6);
+  const tokens = String(query.search || '').trim().split(/\s+/).filter(Boolean).slice(0, 6);
   if (tokens.length) {
     where.user = {
       AND: tokens.map((t) => ({
@@ -74,9 +76,70 @@ router.get('/', async (req, res) => {
       })),
     };
   }
-
   const whereNoStatus = { ...where }; // status counts ignore the status filter itself
   if (status && STATUSES.includes(status)) where.status = status;
+  return { where, whereNoStatus };
+}
+
+/**
+ * GET /api/admin/assignments/export — same filters as the list, returns every matching row as an .xlsx file
+ */
+router.get('/export', async (req, res) => {
+  const { where } = buildWhere(req.query);
+  const rows = await prisma.assignment.findMany({
+    where, include: assignmentInclude, orderBy: [{ workDate: 'asc' }, { id: 'asc' }],
+  });
+
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Assignments');
+  ws.columns = [
+    { header: 'Date', key: 'date', width: 14 },
+    { header: 'Employee ID', key: 'emp', width: 16 },
+    { header: 'User', key: 'user', width: 26 },
+    { header: 'ZIP', key: 'zip', width: 30 },
+    { header: 'Folder name(s)', key: 'folders', width: 36 },
+    { header: 'Image ranges', key: 'ranges', width: 36 },
+    { header: 'Total images', key: 'images', width: 13 },
+    { header: 'Excel files', key: 'excel', width: 36 },
+    { header: 'Status', key: 'status', width: 13 },
+    { header: 'User uploads', key: 'subs', width: 13 },
+    { header: 'Started', key: 'started', width: 20 },
+    { header: 'Completed', key: 'completed', width: 20 },
+    { header: 'Assigned by', key: 'by', width: 22 },
+  ];
+  ws.getRow(1).font = { bold: true };
+  ws.views = [{ state: 'frozen', ySplit: 1 }];
+
+  const fmt = (d) => (d ? d.toISOString().replace('T', ' ').slice(0, 19) : '');
+  for (const a of rows) {
+    const s = serializeAssignment(a);
+    ws.addRow({
+      date: s.workDate,
+      emp: s.user.employeeId,
+      user: s.user.fullName,
+      zip: s.zipUpload.originalName,
+      folders: [...new Set(s.imageRanges.map((r) => r.folderPath || r.folderName || '(root)'))].join('; '),
+      ranges: s.imageRanges.map((r) => `${r.folderPath || r.folderName || '(root)'} ${r.startPosition}-${r.endPosition}`).join('; '),
+      images: s.totalImages,
+      excel: s.excelFiles.map((e) => e.relativePath).join('; '),
+      status: s.status,
+      subs: s.submissionCount,
+      started: fmt(a.startedAt),
+      completed: fmt(a.completedAt),
+      by: s.assignedBy?.fullName || '',
+    });
+  }
+  ws.autoFilter = { from: 'A1', to: 'M1' };
+
+  const label = req.query.date || (req.query.from || req.query.to ? `${req.query.from || 'start'}_to_${req.query.to || 'end'}` : 'all');
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="assignments_${label}.xlsx"`);
+  await wb.xlsx.write(res);
+  res.end();
+});
+
+router.get('/', async (req, res) => {
+  const { where, whereNoStatus } = buildWhere(req.query);
   const orderBy = [{ workDate: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }];
 
   if (req.query.pageSize) {
@@ -123,6 +186,18 @@ router.post('/', async (req, res) => {
   const input = assignmentSchema.parse(req.body);
   const workDate = parseWorkDate(input.workDate);
   const { user, excelFileIds } = await validateAssignmentInput({ ...input, workDate });
+
+  // a new task can only be given once every earlier task of this user is completed
+  const openTask = await prisma.assignment.findFirst({
+    where: { userId: input.userId, status: { not: 'COMPLETED' } },
+    include: { zipUpload: { select: { originalName: true } } },
+    orderBy: { workDate: 'asc' },
+  });
+  if (openTask) {
+    throw conflict(
+      `${fullName(user)} (${user.employeeId}) still has an unfinished task (${formatWorkDate(openTask.workDate)}, ${openTask.status.toLowerCase()}, ${openTask.zipUpload.originalName}). Complete it before assigning new work.`,
+    );
+  }
 
   const created = await prisma.assignment.create({
     data: {

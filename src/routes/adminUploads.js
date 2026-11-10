@@ -224,6 +224,31 @@ router.get('/:id', async (req, res) => {
   });
 });
 
+/** GET /api/admin/uploads/:id/submissions-download — only the files users submitted (no original ZIP content) */
+router.get('/:id/submissions-download', async (req, res) => {
+  const id = toId(req.params.id);
+  const u = await prisma.zipUpload.findUnique({
+    where: { id },
+    include: { assignments: { include: { user: true }, orderBy: [{ workDate: 'asc' }, { id: 'asc' }] } },
+  });
+  if (!u) throw notFound('Upload not found');
+
+  const base = path.basename(u.originalName, path.extname(u.originalName));
+  await streamZip(res, `${base}_submissions.zip`, async (archive) => {
+    for (const a of u.assignments) {
+      const folder = `${formatWorkDate(a.workDate)}_${safeFileName(a.user.employeeId)}_A${a.id}`;
+      const subs = await prisma.submission.findMany({ where: { assignmentId: a.id }, orderBy: { createdAt: 'asc' } });
+      for (const s of subs) {
+        if (s.storagePath) archive.file(fromStoredPath(s.storagePath), { name: `${folder}/${s.storedName}` });
+      }
+      const notes = subs.filter((s) => s.notes).map((s) => `[${s.createdAt.toISOString()}] ${s.originalName || '(no file)'}\n${s.notes}\n`);
+      if (notes.length) archive.append(notes.join('\n'), { name: `${folder}/notes.txt` });
+    }
+  });
+
+  await logActivity({ action: 'ZIP_DOWNLOADED', entityType: 'ZipUpload', entityId: id, actor: req.user, details: { originalName: u.originalName, submissionsOnly: true } });
+});
+
 /** GET /api/admin/uploads/:id/download — everything: extracted files + user submissions + summary CSV */
 router.get('/:id/download', async (req, res) => {
   const id = toId(req.params.id);
