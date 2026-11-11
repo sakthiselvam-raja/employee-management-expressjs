@@ -163,6 +163,23 @@ export async function validateAssignmentInput(input, excludeAssignmentId = null)
   return { user, excelFileIds: uniqueExcel };
 }
 
+/**
+ * A user can only be given (or moved to) new work once all of their earlier tasks are completed.
+ * excludeAssignmentId lets an edit ignore the assignment that is being edited.
+ */
+export async function assertNoOpenTask(user, excludeAssignmentId = null) {
+  const openTask = await prisma.assignment.findFirst({
+    where: { userId: user.id, status: { not: 'COMPLETED' }, id: excludeAssignmentId ? { not: excludeAssignmentId } : undefined },
+    include: { zipUpload: { select: { originalName: true } } },
+    orderBy: { workDate: 'asc' },
+  });
+  if (openTask) {
+    throw conflict(
+      `${fullName(user)} (${user.employeeId}) still has an unfinished task (${formatWorkDate(openTask.workDate)}, ${openTask.status.toLowerCase()}, ${openTask.zipUpload.originalName}). Complete it before assigning new work.`,
+    );
+  }
+}
+
 /** Add an assignment's Excel files, image ranges and (optionally) submissions to an archive. */
 export async function addAssignmentToArchive(archive, assignment, { prefix = '', includeSubmissions = true } = {}) {
   for (const link of assignment.excelFiles) {

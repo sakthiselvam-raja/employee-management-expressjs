@@ -3,11 +3,11 @@ import ExcelJS from 'exceljs';
 import path from 'node:path';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
-import { badRequest, conflict, notFound, toId } from '../lib/errors.js';
+import { badRequest, notFound, toId } from '../lib/errors.js';
 import { dirs, removePath, safeFileName } from '../lib/storage.js';
 import { logActivity, parseWorkDate, fullName, formatWorkDate } from '../lib/activity.js';
 import {
-  assignmentInclude, serializeAssignment, serializeSubmission, statusUpdateData, validateAssignmentInput,
+  assertNoOpenTask, assignmentInclude, serializeAssignment, serializeSubmission, statusUpdateData, validateAssignmentInput,
 } from '../lib/assignments.js';
 import { streamAssignmentZip } from './adminUploads.js';
 
@@ -61,9 +61,16 @@ function buildWhere(query) {
     if (!d) throw badRequest('Invalid date');
     where.workDate = d;
   } else if (from || to) {
-    where.workDate = {};
-    if (from) where.workDate.gte = parseWorkDate(from) ?? undefined;
-    if (to) where.workDate.lte = parseWorkDate(to) ?? undefined;
+    // a range is limited to one month; a missing end is filled in
+    const addMonths = (d, n) => { const x = new Date(d); x.setUTCMonth(x.getUTCMonth() + n); return x; };
+    let f = from ? parseWorkDate(from) : null;
+    let t = to ? parseWorkDate(to) : null;
+    if ((from && !f) || (to && !t)) throw badRequest('Invalid date');
+    if (f && !t) t = addMonths(f, 1);
+    if (!f && t) f = addMonths(t, -1);
+    if (t < f) throw badRequest('End date cannot be before the start date');
+    if (t > addMonths(f, 1)) throw badRequest('Date range can be at most one month');
+    where.workDate = { gte: f, lte: t };
   }
   if (userId) where.userId = toId(userId, 'userId');
   if (zipUploadId) where.zipUploadId = toId(zipUploadId, 'zipUploadId');
@@ -188,16 +195,7 @@ router.post('/', async (req, res) => {
   const { user, excelFileIds } = await validateAssignmentInput({ ...input, workDate });
 
   // a new task can only be given once every earlier task of this user is completed
-  const openTask = await prisma.assignment.findFirst({
-    where: { userId: input.userId, status: { not: 'COMPLETED' } },
-    include: { zipUpload: { select: { originalName: true } } },
-    orderBy: { workDate: 'asc' },
-  });
-  if (openTask) {
-    throw conflict(
-      `${fullName(user)} (${user.employeeId}) still has an unfinished task (${formatWorkDate(openTask.workDate)}, ${openTask.status.toLowerCase()}, ${openTask.zipUpload.originalName}). Complete it before assigning new work.`,
-    );
-  }
+  await assertNoOpenTask(user);
 
   const created = await prisma.assignment.create({
     data: {
@@ -236,6 +234,8 @@ router.put('/:id', async (req, res) => {
   const workDate = parseWorkDate(input.workDate);
   const { user, excelFileIds } = await validateAssignmentInput({ ...input, workDate }, id);
   const reassigned = before.userId !== input.userId;
+  // same user -> just update folders / image counts; a different user must have finished their own tasks first
+  if (reassigned) await assertNoOpenTask(user, id);
 
   const updated = await prisma.$transaction(async (tx) => {
     await tx.assignmentExcel.deleteMany({ where: { assignmentId: id } });

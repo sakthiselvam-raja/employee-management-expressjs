@@ -91,13 +91,13 @@ async function folderSize(dir) {
 
 /**
  * GET /api/admin/dashboard/storage
- * Space used by the uploaded ZIP files and by everything extracted from them (measured on disk),
+ * Space used by the uploaded ZIP files, everything extracted from them and the files users submitted (measured on disk),
  * plus the size of the PostgreSQL database.
  */
 router.get('/dashboard/storage', async (_req, res) => {
-  const [zips, extracted] = await Promise.all([folderSize(dirs.zips), folderSize(dirs.extracted)]);
-  const files = { zips, extracted };
-  const totalBytes = zips.bytes + extracted.bytes;
+  const [zips, extracted, submissions] = await Promise.all([folderSize(dirs.zips), folderSize(dirs.extracted), folderSize(dirs.submissions)]);
+  const files = { zips, extracted, submissions };
+  const totalBytes = zips.bytes + extracted.bytes + submissions.bytes;
 
   // PostgreSQL database size
   let database = null;
