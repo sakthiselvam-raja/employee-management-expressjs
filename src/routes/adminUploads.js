@@ -337,7 +337,7 @@ export const adminFilesRouter = Router();
 adminFilesRouter.get('/folders/:id/images', async (req, res) => {
   const folderId = toId(req.params.id);
   const from = Number(req.query.from) || 1;
-  const to = Number(req.query.to) || Number.MAX_SAFE_INTEGER;
+  const to = Number(req.query.to) || 2147483647;
   const folder = await prisma.imageFolder.findUnique({ where: { id: folderId } });
   if (!folder) throw notFound('Folder not found');
   const where = { folderId, position: { gte: from, lte: to } };
