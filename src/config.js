@@ -24,6 +24,8 @@ export const config = {
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '8h',
   cookieName: 'ism_token',
   cookieSecure: process.env.COOKIE_SECURE === 'true',
+  // 'lax' when the site and API share a domain; 'none' (needs COOKIE_SECURE=true) when they are on different sites
+  cookieSameSite: ['lax', 'strict', 'none'].includes(process.env.COOKIE_SAMESITE) ? process.env.COOKIE_SAMESITE : 'lax',
 
   adminUsername: (process.env.ADMIN_USERNAME || 'admin').trim(),
   adminPassword: process.env.ADMIN_PASSWORD || 'admin@123',
@@ -31,7 +33,7 @@ export const config = {
   defaultUserPassword: process.env.DEFAULT_USER_PASSWORD || 'ism@123',
 
   storageRoot: path.resolve(process.env.STORAGE_DIR || './storage'),
-  maxZipBytes: mb('MAX_ZIP_SIZE_MB', 1024),
-  maxExtractedBytes: mb('MAX_EXTRACTED_SIZE_MB', 4096),
+  maxZipBytes: mb('MAX_ZIP_SIZE_MB', 6144),
+  maxExtractedBytes: mb('MAX_EXTRACTED_SIZE_MB', 12288),
   maxSubmissionBytes: mb('MAX_SUBMISSION_SIZE_MB', 50),
 };

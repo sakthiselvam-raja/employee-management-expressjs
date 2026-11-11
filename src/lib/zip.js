@@ -7,7 +7,7 @@ import { HttpError, badRequest } from './errors.js';
 import { resolveInside } from './storage.js';
 import { isExcel, isImage, naturalCompare, extOf } from './fileTypes.js';
 
-const MAX_ENTRIES = 100_000;
+const MAX_ENTRIES = 500_000;
 
 /** Skip macOS metadata, hidden files and Windows thumbnails. */
 function shouldSkip(name) {

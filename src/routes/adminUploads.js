@@ -4,7 +4,7 @@ import path from 'node:path';
 import multer from 'multer';
 import { prisma } from '../lib/prisma.js';
 import { config } from '../config.js';
-import { badRequest, conflict, notFound, toId } from '../lib/errors.js';
+import { HttpError, badRequest, conflict, notFound, toId } from '../lib/errors.js';
 import {
   dirs, uniqueKey, toStoredPath, fromStoredPath, removePath, assertFileExists, fixOriginalName, safeFileName,
 } from '../lib/storage.js';
@@ -37,8 +37,38 @@ function statusSummary(assignments) {
   return s;
 }
 
+const GB = 1024 ** 3;
+const gb = (n) => (n / GB).toFixed(1);
+const DISK_FACTOR = 2.3; // ZIP copy + extracted copy + some headroom
+
+async function freeDiskBytes() {
+  const st = await fsp.statfs(dirs.root);
+  return Number(st.bavail) * Number(st.bsize);
+}
+
+/** Reject early — before gigabytes are transferred — when the ZIP is too big or the disk is too full. */
+async function preflight(req, _res, next) {
+  const len = Number(req.headers['content-length']);
+  if (len) {
+    if (len > config.maxZipBytes + 10 * 1024 * 1024) {
+      throw new HttpError(413, `This ZIP is ${gb(len)} GB. The allowed maximum is ${gb(config.maxZipBytes)} GB.`);
+    }
+    const free = await freeDiskBytes().catch(() => null);
+    if (free !== null && free < len * DISK_FACTOR) {
+      throw new HttpError(507, `Not enough free disk space on the server: about ${gb(len * DISK_FACTOR)} GB needed, ${gb(free)} GB free.`);
+    }
+  }
+  next();
+}
+
+/** GET /api/admin/uploads/limits — what the upload page shows and checks before sending a big file */
+router.get('/limits', async (_req, res) => {
+  const free = await freeDiskBytes().catch(() => null);
+  res.json({ maxZipBytes: config.maxZipBytes, maxExtractedBytes: config.maxExtractedBytes, freeDiskBytes: free, diskFactor: DISK_FACTOR });
+});
+
 /** POST /api/admin/uploads  (multipart, field "file") — upload + extract + index */
-router.post('/', upload.single('file'), async (req, res) => {
+router.post('/', preflight, upload.single('file'), async (req, res) => {
   if (!req.file) throw badRequest('Please choose a ZIP file');
 
   const originalName = fixOriginalName(req.file.originalname);
@@ -46,6 +76,7 @@ router.post('/', upload.single('file'), async (req, res) => {
   const storedName = `${key}_${safeFileName(originalName, 'upload.zip')}`;
   const zipAbs = path.join(dirs.zips, storedName);
   const extractAbs = path.join(dirs.extracted, key);
+  let createdId = null;
 
   try {
     await fsp.rename(req.file.path, zipAbs);
@@ -57,6 +88,7 @@ router.post('/', upload.single('file'), async (req, res) => {
       throw badRequest('No Excel files or images were found in this ZIP');
     }
 
+    // 1) the ZIP, its Excel files and the (empty) folders
     const created = await prisma.zipUpload.create({
       data: {
         originalName,
@@ -77,25 +109,31 @@ router.post('/', upload.single('file'), async (req, res) => {
           })),
         },
         imageFolders: {
-          create: imageFolders.map((f) => ({
-            name: f.name,
-            relativePath: f.relativePath,
-            imageCount: f.images.length,
-            images: {
-              createMany: {
-                data: f.images.map((img) => ({
-                  position: img.position,
-                  fileName: img.fileName,
-                  relativePath: img.relativePath,
-                  storagePath: `${toStoredPath(extractAbs)}/${img.relativePath}`,
-                  sizeBytes: img.sizeBytes,
-                })),
-              },
-            },
-          })),
+          create: imageFolders.map((f) => ({ name: f.name, relativePath: f.relativePath, imageCount: f.images.length })),
         },
       },
+      include: { imageFolders: { select: { id: true, relativePath: true } } },
     });
+    createdId = created.id;
+
+    // 2) the images, in chunks (a ZIP can hold tens of thousands of images — one huge insert would hit database limits)
+    const folderIdByPath = new Map(created.imageFolders.map((f) => [f.relativePath, f.id]));
+    const CHUNK = 5000;
+    for (const f of imageFolders) {
+      const folderId = folderIdByPath.get(f.relativePath);
+      for (let i = 0; i < f.images.length; i += CHUNK) {
+        await prisma.imageFile.createMany({
+          data: f.images.slice(i, i + CHUNK).map((img) => ({
+            folderId,
+            position: img.position,
+            fileName: img.fileName,
+            relativePath: img.relativePath,
+            storagePath: `${toStoredPath(extractAbs)}/${img.relativePath}`,
+            sizeBytes: img.sizeBytes,
+          })),
+        });
+      }
+    }
 
     await logActivity({
       action: 'ZIP_UPLOADED', entityType: 'ZipUpload', entityId: created.id, actor: req.user,
@@ -121,6 +159,8 @@ router.post('/', upload.single('file'), async (req, res) => {
       },
     });
   } catch (err) {
+    // roll back everything: half-indexed database rows and the files on disk
+    if (createdId) await prisma.zipUpload.delete({ where: { id: createdId } }).catch(() => {});
     await Promise.all([removePath(req.file.path), removePath(zipAbs), removePath(extractAbs)]);
     throw err;
   }

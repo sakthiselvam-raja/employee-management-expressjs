@@ -11,14 +11,14 @@ export function setAuthCookie(res, token) {
   res.cookie(config.cookieName, token, {
     httpOnly: true,
     secure: config.cookieSecure,
-    sameSite: 'lax',
+    sameSite: config.cookieSameSite,
     path: '/',
     maxAge: 8 * 60 * 60 * 1000,
   });
 }
 
 export function clearAuthCookie(res) {
-  res.clearCookie(config.cookieName, { httpOnly: true, secure: config.cookieSecure, sameSite: 'lax', path: '/' });
+  res.clearCookie(config.cookieName, { httpOnly: true, secure: config.cookieSecure, sameSite: config.cookieSameSite, path: '/' });
 }
 
 /** Reads the JWT from the httpOnly cookie (or a Bearer header) and loads the user. */

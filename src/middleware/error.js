@@ -19,7 +19,7 @@ export function errorHandler(err, req, res, _next) {
     return res.status(400).json({ message: details[0]?.message || 'Invalid input', details });
   }
   if (err instanceof multer.MulterError) {
-    const message = err.code === 'LIMIT_FILE_SIZE' ? 'File is larger than the allowed size' : err.message;
+    const message = err.code === 'LIMIT_FILE_SIZE' ? 'File is larger than the allowed size (check MAX_ZIP_SIZE_MB on the server)' : err.message;
     return res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ message });
   }
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
