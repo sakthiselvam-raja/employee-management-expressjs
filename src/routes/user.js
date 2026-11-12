@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
 import { config } from '../config.js';
 import { badRequest, forbidden, notFound, toId } from '../lib/errors.js';
+import { appRequestOnly } from '../middleware/appOnly.js';
 import {
   dirs, uniqueKey, toStoredPath, removePath, assertFileExists, fixOriginalName, safeFileName,
 } from '../lib/storage.js';
@@ -138,7 +139,7 @@ router.get('/assignments/:id/ranges/:rangeId/images', async (req, res) => {
   return res.json({ range, images });
 });
 
-router.get('/assignments/:id/images/:imageId', async (req, res) => {
+router.get('/assignments/:id/images/:imageId', appRequestOnly, async (req, res) => {
   const a = await loadOwnAssignment(req);
   const img = await prisma.imageFile.findUnique({ where: { id: toId(req.params.imageId) } });
   const allowed = img && a.imageRanges.some((r) => r.imageFolderId === img.folderId

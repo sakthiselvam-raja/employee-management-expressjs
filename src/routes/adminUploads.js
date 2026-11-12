@@ -12,6 +12,7 @@ import { extractZip, scanExtracted } from '../lib/zip.js';
 import { previewSpreadsheet } from '../lib/excel.js';
 import { streamZip, toCsv } from '../lib/archive.js';
 import { logActivity, fullName, formatWorkDate } from '../lib/activity.js';
+import { appRequestOnly } from '../middleware/appOnly.js';
 import { addAssignmentToArchive, assignmentInclude } from '../lib/assignments.js';
 
 const router = Router();
@@ -397,7 +398,7 @@ adminFilesRouter.get('/folders/:id/images', async (req, res) => {
   return res.json({ folder, images });
 });
 
-adminFilesRouter.get('/images/:id', async (req, res) => {
+adminFilesRouter.get('/images/:id', appRequestOnly, async (req, res) => {
   const img = await prisma.imageFile.findUnique({ where: { id: toId(req.params.id) } });
   if (!img) throw notFound('Image not found');
   const abs = await assertFileExists(img.storagePath);
