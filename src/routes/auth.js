@@ -9,12 +9,15 @@ import { authenticate, signToken, setAuthCookie, clearAuthCookie } from '../midd
 
 const router = Router();
 
+// Only FAILED logins (wrong password / unknown user) count; successful logins never use up the limit,
+// so many users on one network can log in freely.
 const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 30,
+  windowMs: 2 * 60 * 1000, // a blocked network can try again after at most 2 minutes
+  limit: 30,               // failed logins allowed per IP in that window
+  skipSuccessfulRequests: true,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
-  message: { message: 'Too many login attempts — please try again in a few minutes' },
+  message: { message: 'Too many failed login attempts — please try again in 2 minutes' },
 });
 
 // Used when no user is found so the response time doesn't reveal which accounts exist
