@@ -15,7 +15,7 @@ import { previewSpreadsheet } from '../lib/excel.js';
 import { streamZip } from '../lib/archive.js';
 import { logActivity, parseWorkDate, formatWorkDate } from '../lib/activity.js';
 import {
-  assignmentInclude, serializeAssignment, serializeSubmission, statusUpdateData, addAssignmentToArchive,
+  assignmentInclude, serializeAssignmentFull, serializeAssignmentsFull, serializeSubmission, statusUpdateData, addAssignmentToArchive,
 } from '../lib/assignments.js';
 
 const router = Router();
@@ -58,7 +58,7 @@ router.get('/assignments', async (req, res) => {
     take: 500,
   });
   // Users never need their own profile repeated on every row
-  res.json({ assignments: list.map((a) => ({ ...serializeAssignment(a), user: undefined })) });
+  res.json({ assignments: (await serializeAssignmentsFull(list)).map((a) => ({ ...a, user: undefined })) });
 });
 
 router.get('/assignments/:id', async (req, res) => {
@@ -69,7 +69,7 @@ router.get('/assignments/:id', async (req, res) => {
     orderBy: { createdAt: 'desc' },
   });
   res.json({
-    assignment: { ...serializeAssignment(a), user: undefined },
+    assignment: { ...(await serializeAssignmentFull(a)), user: undefined },
     submissions: submissions.map((s) => ({ ...serializeSubmission(s), storagePath: undefined, storedName: undefined })),
   });
 });
@@ -87,7 +87,7 @@ router.patch('/assignments/:id/status', async (req, res) => {
     action: 'STATUS_CHANGED', entityType: 'Assignment', entityId: a.id, actor: req.user,
     details: { from: a.status, to: status, workDate: formatWorkDate(a.workDate) },
   });
-  res.json({ assignment: { ...serializeAssignment(updated), user: undefined } });
+  res.json({ assignment: { ...(await serializeAssignmentFull(updated)), user: undefined } });
 });
 
 /* ---------- Excel files ---------- */
@@ -226,7 +226,7 @@ router.post('/assignments/:id/submissions', submissionUpload.single('file'), asy
 
   res.status(201).json({
     submission: { ...serializeSubmission(submission), storagePath: undefined, storedName: undefined },
-    assignment: { ...serializeAssignment(assignment), user: undefined },
+    assignment: { ...(await serializeAssignmentFull(assignment)), user: undefined },
   });
 });
 

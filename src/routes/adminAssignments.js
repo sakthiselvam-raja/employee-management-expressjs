@@ -7,7 +7,7 @@ import { badRequest, notFound, toId } from '../lib/errors.js';
 import { dirs, removePath, safeFileName } from '../lib/storage.js';
 import { logActivity, parseWorkDate, fullName, formatWorkDate } from '../lib/activity.js';
 import {
-  assertNoOpenTask, assignmentInclude, serializeAssignment, serializeSubmission, statusUpdateData, validateAssignmentInput,
+  assertNoOpenTask, assignmentInclude, attachRangeNames, serializeAssignment, serializeAssignmentFull, serializeAssignmentsFull, serializeSubmission, statusUpdateData, validateAssignmentInput,
 } from '../lib/assignments.js';
 import { streamAssignmentZip } from './adminUploads.js';
 
@@ -117,6 +117,7 @@ router.get('/export', async (req, res) => {
   ws.getRow(1).font = { bold: true };
   ws.views = [{ state: 'frozen', ySplit: 1 }];
 
+  await attachRangeNames(rows);
   const fmt = (d) => (d ? d.toISOString().replace('T', ' ').slice(0, 19) : '');
   for (const a of rows) {
     const s = serializeAssignment(a);
@@ -126,7 +127,7 @@ router.get('/export', async (req, res) => {
       user: s.user.fullName,
       zip: s.zipUpload.originalName,
       folders: [...new Set(s.imageRanges.map((r) => r.folderPath || r.folderName || '(root)'))].join('; '),
-      ranges: s.imageRanges.map((r) => `${r.folderPath || r.folderName || '(root)'} ${r.startPosition}-${r.endPosition}`).join('; '),
+      ranges: s.imageRanges.map((r) => `${r.folderPath || r.folderName || '(root)'}: ${r.startName ?? r.startPosition} to ${r.endName ?? r.endPosition}`).join('; '),
       images: s.totalImages,
       excel: s.excelFiles.map((e) => e.relativePath).join('; '),
       status: s.status,
@@ -160,12 +161,12 @@ router.get('/', async (req, res) => {
     const counts = { PENDING: 0, PROCESSING: 0, COMPLETED: 0 };
     grouped.forEach((g) => { counts[g.status] = g._count._all; });
     return res.json({
-      assignments: rows.map(serializeAssignment), total, page, pageSize, pages: Math.max(Math.ceil(total / pageSize), 1), counts,
+      assignments: await serializeAssignmentsFull(rows), total, page, pageSize, pages: Math.max(Math.ceil(total / pageSize), 1), counts,
     });
   }
 
   const assignments = await prisma.assignment.findMany({ where, include: assignmentInclude, orderBy, take: 2000 });
-  return res.json({ assignments: assignments.map(serializeAssignment) });
+  return res.json({ assignments: await serializeAssignmentsFull(assignments) });
 });
 
 router.get('/:id', async (req, res) => {
@@ -182,10 +183,10 @@ router.get('/:id', async (req, res) => {
       prisma.submission.count({ where }),
       prisma.submission.findMany({ where, include: { uploadedBy: true }, orderBy, skip: (subPage - 1) * subPageSize, take: subPageSize }),
     ]);
-    return res.json({ assignment: serializeAssignment(a), submissions: rows.map(serializeSubmission), submissionTotal, subPage, subPageSize });
+    return res.json({ assignment: await serializeAssignmentFull(a), submissions: rows.map(serializeSubmission), submissionTotal, subPage, subPageSize });
   }
   const submissions = await prisma.submission.findMany({ where, include: { uploadedBy: true }, orderBy });
-  return res.json({ assignment: serializeAssignment(a), submissions: submissions.map(serializeSubmission) });
+  return res.json({ assignment: await serializeAssignmentFull(a), submissions: submissions.map(serializeSubmission) });
 });
 
 /** POST /api/admin/assignments */
@@ -221,7 +222,7 @@ router.post('/', async (req, res) => {
       imageRanges: created.imageRanges.map((r) => `${r.imageFolder.relativePath || '(root)'}: ${r.startPosition}-${r.endPosition}`),
     },
   });
-  res.status(201).json({ assignment: serializeAssignment(created) });
+  res.status(201).json({ assignment: await serializeAssignmentFull(created) });
 });
 
 /** PUT /api/admin/assignments/:id — modify or reassign (change user / date / files / ranges) */
@@ -261,7 +262,7 @@ router.put('/:id', async (req, res) => {
       to: { user: `${fullName(user)} (${user.employeeId})`, workDate: input.workDate, excelFileIds, imageRanges: rangeSummary(input.imageRanges) },
     },
   });
-  res.json({ assignment: serializeAssignment(updated) });
+  res.json({ assignment: await serializeAssignmentFull(updated) });
 });
 
 /** PATCH /api/admin/assignments/:id/status { status } */
@@ -278,7 +279,7 @@ router.patch('/:id/status', async (req, res) => {
     action: 'STATUS_CHANGED', entityType: 'Assignment', entityId: id, actor: req.user,
     details: { from: before.status, to: status, user: before.user.employeeId, workDate: formatWorkDate(before.workDate) },
   });
-  res.json({ assignment: serializeAssignment(updated) });
+  res.json({ assignment: await serializeAssignmentFull(updated) });
 });
 
 /** POST /api/admin/assignments/bulk-status { ids: [], status } */

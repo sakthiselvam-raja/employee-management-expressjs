@@ -14,7 +14,7 @@ import { previewSpreadsheet } from '../lib/excel.js';
 import { streamZip, toCsv } from '../lib/archive.js';
 import { logActivity, fullName, formatWorkDate } from '../lib/activity.js';
 import { appRequestOnly } from '../middleware/appOnly.js';
-import { addAssignmentToArchive, assignmentInclude } from '../lib/assignments.js';
+import { addAssignmentToArchive, assignmentInclude, attachRangeNames, imageNameMap } from '../lib/assignments.js';
 
 const router = Router();
 
@@ -224,6 +224,11 @@ router.get('/:id', async (req, res) => {
   });
   if (!u) throw notFound('Upload not found');
 
+  const names = await imageNameMap(u.imageFolders.flatMap((f) => f.ranges.flatMap((r) => [
+    { folderId: f.id, position: r.startPosition },
+    { folderId: f.id, position: r.endPosition },
+  ])));
+
   const assignee = (a) => ({
     assignmentId: a.id,
     workDate: formatWorkDate(a.workDate),
@@ -263,6 +268,8 @@ router.get('/:id', async (req, res) => {
           id: r.id,
           startPosition: r.startPosition,
           endPosition: r.endPosition,
+          startName: names.get(`${f.id}:${r.startPosition}`) ?? null,
+          endName: names.get(`${f.id}:${r.endPosition}`) ?? null,
           ...assignee(r.assignment),
         })),
       })),
@@ -330,6 +337,7 @@ router.get('/:id/download', async (req, res) => {
   await streamZip(res, `${base}_export.zip`, async (archive) => {
     archive.directory(fromStoredPath(u.extractPath), 'original_files');
 
+    await attachRangeNames(u.assignments);
     const rows = [['Assignment ID', 'Work date', 'Employee ID', 'User', 'Status', 'Excel files', 'Image ranges', 'Completed at']];
     for (const a of u.assignments) {
       rows.push([
@@ -339,7 +347,7 @@ router.get('/:id/download', async (req, res) => {
         fullName(a.user),
         a.status,
         a.excelFiles.map((x) => x.excelFile.relativePath).join('; '),
-        a.imageRanges.map((r) => `${r.imageFolder.relativePath || '(root)'} ${r.startPosition}-${r.endPosition}`).join('; '),
+        a.imageRanges.map((r) => `${r.imageFolder.relativePath || '(root)'}: ${r.startName ?? r.startPosition} to ${r.endName ?? r.endPosition}`).join('; '),
         a.completedAt ? a.completedAt.toISOString() : '',
       ]);
       const folder = `user_work/${formatWorkDate(a.workDate)}_${safeFileName(a.user.employeeId)}_A${a.id}`;
@@ -409,6 +417,8 @@ adminFilesRouter.get('/folders/:id/images', async (req, res) => {
   const folder = await prisma.imageFolder.findUnique({ where: { id: folderId } });
   if (!folder) throw notFound('Folder not found');
   const where = { folderId, position: { gte: from, lte: to } };
+  const search = String(req.query.q || '').trim();
+  if (search) where.fileName = { contains: search, mode: 'insensitive' }; // used by the From / To name pickers
   const select = { id: true, position: true, fileName: true, sizeBytes: true };
 
   // optional pagination: ?page=1&pageSize=24 (pageSize 5-100); without pageSize every image is returned

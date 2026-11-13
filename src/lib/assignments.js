@@ -33,8 +33,53 @@ export function serializeRange(r) {
     folderImageCount: r.imageFolder?.imageCount,
     startPosition: r.startPosition,
     endPosition: r.endPosition,
+    startName: r.startName ?? null, // file name of the first / last image of the range (see attachRangeNames)
+    endName: r.endName ?? null,
     count: r.endPosition - r.startPosition + 1,
   };
+}
+
+/** Map "folderId:position" -> file name for the given [{ folderId, position }] pairs (one query per call). */
+export async function imageNameMap(pairs) {
+  const byFolder = new Map();
+  for (const { folderId, position } of pairs) {
+    if (!byFolder.has(folderId)) byFolder.set(folderId, new Set());
+    byFolder.get(folderId).add(position);
+  }
+  const map = new Map();
+  if (!byFolder.size) return map;
+  const rows = await prisma.imageFile.findMany({
+    where: { OR: [...byFolder].map(([folderId, positions]) => ({ folderId, position: { in: [...positions] } })) },
+    select: { folderId: true, position: true, fileName: true },
+  });
+  for (const r of rows) map.set(`${r.folderId}:${r.position}`, r.fileName);
+  return map;
+}
+
+/** Add startName / endName (image file names) to every image range of the given assignments. */
+export async function attachRangeNames(assignments) {
+  const ranges = assignments.flatMap((a) => a.imageRanges || []);
+  if (!ranges.length) return assignments;
+  const pairs = ranges.flatMap((r) => [
+    { folderId: r.imageFolderId, position: r.startPosition },
+    { folderId: r.imageFolderId, position: r.endPosition },
+  ]);
+  const names = await imageNameMap(pairs);
+  for (const r of ranges) {
+    r.startName = names.get(`${r.imageFolderId}:${r.startPosition}`) ?? null;
+    r.endName = names.get(`${r.imageFolderId}:${r.endPosition}`) ?? null;
+  }
+  return assignments;
+}
+
+export async function serializeAssignmentFull(a) {
+  await attachRangeNames([a]);
+  return serializeAssignment(a);
+}
+
+export async function serializeAssignmentsFull(list) {
+  await attachRangeNames(list);
+  return list.map(serializeAssignment);
 }
 
 export function serializeAssignment(a) {
