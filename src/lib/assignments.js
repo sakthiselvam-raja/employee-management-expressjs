@@ -140,12 +140,12 @@ export async function validateAssignmentInput(input, excludeAssignmentId = null)
     }
   }
 
-  // Overlaps with other assignments on the same working date
+  // Overlaps with other assignments — an image is assigned once, whatever the working date
   if (imageRanges.length) {
     const existing = await prisma.assignmentImageRange.findMany({
       where: {
         imageFolderId: { in: folderIds },
-        assignment: { workDate, id: excludeAssignmentId ? { not: excludeAssignmentId } : undefined },
+        assignment: { id: excludeAssignmentId ? { not: excludeAssignmentId } : undefined },
       },
       include: { assignment: { include: { user: true } } },
     });
@@ -154,7 +154,7 @@ export async function validateAssignmentInput(input, excludeAssignmentId = null)
         && e.startPosition <= r.endPosition && r.startPosition <= e.endPosition);
       if (clash) {
         throw conflict(
-          `Images ${clash.startPosition}–${clash.endPosition} of folder "${folderMap.get(r.imageFolderId).name}" are already assigned to ${fullName(clash.assignment.user)} (${clash.assignment.user.employeeId}) for ${formatWorkDate(workDate)}`,
+          `Images ${clash.startPosition}–${clash.endPosition} of folder "${folderMap.get(r.imageFolderId).name}" are already assigned to ${fullName(clash.assignment.user)} (${clash.assignment.user.employeeId}) (${formatWorkDate(clash.assignment.workDate)})`,
         );
       }
     }
