@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import multer from 'multer';
@@ -136,6 +137,10 @@ router.post('/', preflight, upload.single('file'), async (req, res) => {
       }
     }
 
+    // Everything is extracted and indexed, so the original ZIP only wastes disk space: delete it.
+    // (Downloads rebuild the ZIP from the extracted files.)
+    await removePath(zipAbs).catch((e) => console.warn('[upload] could not delete the original ZIP:', e.message));
+
     await logActivity({
       action: 'ZIP_UPLOADED', entityType: 'ZipUpload', entityId: created.id, actor: req.user,
       details: {
@@ -263,6 +268,28 @@ router.get('/:id', async (req, res) => {
       })),
     },
   });
+});
+
+/**
+ * GET /api/admin/uploads/:id/original-download — the uploaded ZIP rebuilt from the extracted files.
+ * Same folders and file names as the ZIP that was uploaded (the original itself is deleted after extraction).
+ */
+router.get('/:id/original-download', async (req, res) => {
+  const id = toId(req.params.id);
+  const u = await prisma.zipUpload.findUnique({ where: { id } });
+  if (!u) throw notFound('Upload not found');
+
+  const dir = fromStoredPath(u.extractPath);
+  if (!fs.existsSync(dir)) throw notFound('The extracted files of this upload are missing');
+
+  await streamZip(
+    res,
+    u.originalName.toLowerCase().endsWith('.zip') ? u.originalName : `${u.originalName}.zip`,
+    (archive) => { archive.directory(dir, false); },
+    { level: 0, forceZip64: Number(u.sizeBytes) > 3.5 * 1024 ** 3 }, // images are already compressed: store, don't re-deflate
+  );
+
+  await logActivity({ action: 'ZIP_DOWNLOADED', entityType: 'ZipUpload', entityId: id, actor: req.user, details: { originalName: u.originalName, rebuilt: true } });
 });
 
 /** GET /api/admin/uploads/:id/submissions-download — only the files users submitted (no original ZIP content) */
