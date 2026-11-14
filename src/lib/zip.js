@@ -118,7 +118,7 @@ export function readXlsxSheetNames(filePath) {
   });
 }
 
-async function sheetNamesFor(absPath) {
+export async function sheetNamesFor(absPath) {
   const ext = extOf(absPath);
   if (ext === '.xlsx' || ext === '.xlsm') return readXlsxSheetNames(absPath);
   if (ext === '.csv') return ['CSV'];

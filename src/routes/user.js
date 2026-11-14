@@ -5,7 +5,7 @@ import multer from 'multer';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
 import { config } from '../config.js';
-import { badRequest, forbidden, notFound, toId } from '../lib/errors.js';
+import { badRequest, conflict, forbidden, notFound, toId } from '../lib/errors.js';
 import { appRequestOnly } from '../middleware/appOnly.js';
 import {
   dirs, uniqueKey, toStoredPath, removePath, assertFileExists, fixOriginalName, safeFileName,
@@ -189,6 +189,13 @@ router.post('/assignments/:id/submissions', submissionUpload.single('file'), asy
     throw err;
   }
 
+  // one task = one submission (add once, then edit or delete it)
+  const existing = await prisma.submission.count({ where: { assignmentId: a.id, uploadedById: req.user.id } });
+  if (existing > 0) {
+    if (req.file) await removePath(req.file.path);
+    throw conflict('You have already submitted work for this task. Edit or delete your submission instead.');
+  }
+
   const notes = String(req.body?.notes || '').trim().slice(0, 5000) || null;
   if (!req.file && !notes) throw badRequest('Attach an Excel file or write a note');
 
@@ -252,6 +259,62 @@ router.get('/submissions/:id/preview', async (req, res) => {
   res.json({ fileName: s.originalName, ...(await previewSpreadsheet(await assertFileExists(s.storagePath))) });
 });
 
+/**
+ * PUT /api/user/submissions/:id  (multipart) — edit your submission.
+ * fields: file (optional — replaces the current file), notes, markCompleted=true|false
+ */
+router.put('/submissions/:id', submissionUpload.single('file'), async (req, res) => {
+  const cleanup = async () => { if (req.file) await removePath(req.file.path); };
+  let s;
+  try {
+    s = await prisma.submission.findUnique({
+      where: { id: toId(req.params.id) },
+      include: { assignment: { include: assignmentInclude } },
+    });
+    if (!s) throw notFound('Submission not found');
+    if (s.assignment.userId !== req.user.id || s.uploadedById !== req.user.id) throw forbidden('You can only edit your own submission');
+  } catch (err) {
+    await cleanup();
+    throw err;
+  }
+
+  const notes = String(req.body?.notes ?? s.notes ?? '').trim().slice(0, 5000) || null;
+  if (!req.file && !s.storagePath && !notes) throw badRequest('A submission needs an Excel file or a note');
+
+  let fileData = {};
+  if (req.file) {
+    const originalName = fixOriginalName(req.file.originalname);
+    const storedName = `${uniqueKey()}_${safeFileName(originalName, 'submission.xlsx')}`;
+    const destDir = path.join(dirs.submissions, String(s.assignmentId));
+    await fsp.mkdir(destDir, { recursive: true });
+    const destAbs = path.join(destDir, storedName);
+    await fsp.rename(req.file.path, destAbs);
+    fileData = { originalName, storedName, storagePath: toStoredPath(destAbs), sizeBytes: req.file.size };
+  }
+
+  const updated = await prisma.submission.update({ where: { id: s.id }, data: { notes, ...fileData }, include: { uploadedBy: true } });
+  if (req.file && s.storagePath) {
+    try { await removePath(await assertFileExists(s.storagePath)); } catch { /* old file already gone */ }
+  }
+
+  let assignment = s.assignment;
+  if (req.body?.markCompleted === 'true' && assignment.status !== 'COMPLETED') {
+    assignment = await prisma.assignment.update({ where: { id: assignment.id }, data: statusUpdateData(assignment, 'COMPLETED'), include: assignmentInclude });
+  } else if (assignment.status === 'PENDING') {
+    assignment = await prisma.assignment.update({ where: { id: assignment.id }, data: statusUpdateData(assignment, 'PROCESSING'), include: assignmentInclude });
+  }
+
+  await logActivity({
+    action: 'SUBMISSION_UPDATED', entityType: 'Assignment', entityId: s.assignmentId, actor: req.user,
+    details: { submissionId: s.id, file: fileData.originalName || s.originalName || null, replacedFile: Boolean(req.file), hasNotes: Boolean(notes), statusAfter: assignment.status },
+  });
+
+  res.json({
+    submission: { ...serializeSubmission(updated), storagePath: undefined, storedName: undefined },
+    assignment: { ...(await serializeAssignmentFull(assignment)), user: undefined },
+  });
+});
+
 /** DELETE /api/user/submissions/:id — a user can remove their own submission (file + notes) */
 router.delete('/submissions/:id', async (req, res) => {
   const s = await prisma.submission.findUnique({
@@ -265,11 +328,21 @@ router.delete('/submissions/:id', async (req, res) => {
   if (s.storagePath) {
     try { await removePath(await assertFileExists(s.storagePath)); } catch { /* file already gone */ }
   }
+  // the work is gone: a completed task goes back to "processing" so the user can submit again
+  const left = await prisma.submission.count({ where: { assignmentId: s.assignment.id } });
+  let reopened = false;
+  if (left === 0) {
+    const a = await prisma.assignment.findUnique({ where: { id: s.assignment.id } });
+    if (a && a.status === 'COMPLETED') {
+      await prisma.assignment.update({ where: { id: a.id }, data: statusUpdateData(a, 'PROCESSING') });
+      reopened = true;
+    }
+  }
   await logActivity({
     action: 'SUBMISSION_DELETED', entityType: 'Assignment', entityId: s.assignment.id, actor: req.user,
-    details: { submissionId: s.id, file: s.originalName || null, hadNotes: Boolean(s.notes) },
+    details: { submissionId: s.id, file: s.originalName || null, hadNotes: Boolean(s.notes), reopened },
   });
-  res.json({ ok: true });
+  res.json({ ok: true, reopened });
 });
 
 router.get('/submissions/:id/download', async (req, res) => {

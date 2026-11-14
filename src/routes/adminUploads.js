@@ -9,7 +9,8 @@ import { HttpError, badRequest, conflict, notFound, toId } from '../lib/errors.j
 import {
   dirs, uniqueKey, toStoredPath, fromStoredPath, removePath, assertFileExists, fixOriginalName, safeFileName,
 } from '../lib/storage.js';
-import { extractZip, scanExtracted } from '../lib/zip.js';
+import { extractZip, scanExtracted, sheetNamesFor } from '../lib/zip.js';
+import { isExcel } from '../lib/fileTypes.js';
 import { previewSpreadsheet } from '../lib/excel.js';
 import { streamZip, toCsv } from '../lib/archive.js';
 import { logActivity, fullName, formatWorkDate } from '../lib/activity.js';
@@ -26,6 +27,19 @@ const upload = multer({
   limits: { fileSize: config.maxZipBytes, files: 1 },
   fileFilter: (_req, file, cb) => {
     if (path.extname(file.originalname).toLowerCase() !== '.zip') return cb(badRequest('Only .zip files are allowed'));
+    return cb(null, true);
+  },
+});
+
+// extra Excel sheets added to an existing ZIP upload (several at once)
+const excelUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, dirs.tmp),
+    filename: (_req, _file, cb) => cb(null, `${uniqueKey()}.upload`),
+  }),
+  limits: { fileSize: config.maxSubmissionBytes, files: 30 },
+  fileFilter: (_req, file, cb) => {
+    if (!isExcel(fixOriginalName(file.originalname))) return cb(badRequest('Only Excel files (.xlsx, .xlsm, .xls, .csv) can be added'));
     return cb(null, true);
   },
 });
@@ -275,6 +289,94 @@ router.get('/:id', async (req, res) => {
       })),
     },
   });
+});
+
+/**
+ * POST /api/admin/uploads/:id/excel  (multipart, field "files", up to 30)
+ * Add more Excel sheets to an existing ZIP upload. They are stored with the extracted files,
+ * so they can be assigned to users like the sheets that came inside the ZIP.
+ */
+router.post('/:id/excel', excelUpload.array('files', 30), async (req, res) => {
+  const files = req.files || [];
+  try {
+    const id = toId(req.params.id);
+    const u = await prisma.zipUpload.findUnique({ where: { id } });
+    if (!u) throw notFound('Upload not found');
+    if (!files.length) throw badRequest('Choose at least one Excel file');
+
+    const dir = fromStoredPath(u.extractPath);
+    await fsp.mkdir(dir, { recursive: true });
+
+    const added = [];
+    for (const f of files) {
+      const original = fixOriginalName(f.originalname);
+      const safe = safeFileName(original, 'sheet.xlsx');
+      const ext = path.extname(safe);
+      const base = path.basename(safe, ext);
+      let candidate = safe;
+      for (let n = 1; fs.existsSync(path.join(dir, candidate)); n += 1) candidate = `${base}_${n}${ext}`; // never overwrite
+      const abs = path.join(dir, candidate);
+      await fsp.rename(f.path, abs);
+      added.push(await prisma.excelFile.create({
+        data: {
+          zipUploadId: id,
+          fileName: candidate === safe ? original : candidate,
+          relativePath: candidate,
+          storagePath: toStoredPath(abs),
+          sizeBytes: f.size,
+          sheetNames: await sheetNamesFor(abs),
+        },
+      }));
+    }
+    await prisma.zipUpload.update({ where: { id }, data: { totalFiles: { increment: added.length } } });
+
+    await logActivity({
+      action: 'EXCEL_ADDED', entityType: 'ZipUpload', entityId: id, actor: req.user,
+      details: { originalName: u.originalName, files: added.map((e) => e.relativePath) },
+    });
+    res.status(201).json({ added: added.length });
+  } catch (err) {
+    await Promise.all(files.map((f) => removePath(f.path)));
+    throw err;
+  }
+});
+
+/**
+ * DELETE /api/admin/uploads/:id/excel/:excelId[?force=true]
+ * Remove an Excel sheet (database + file). If it is assigned to users, force=true is needed and it is taken away
+ * from those assignments; an assignment that would be left with nothing at all blocks the removal.
+ */
+router.delete('/:id/excel/:excelId', async (req, res) => {
+  const id = toId(req.params.id);
+  const excelId = toId(req.params.excelId);
+  const e = await prisma.excelFile.findFirst({
+    where: { id: excelId, zipUploadId: id },
+    include: {
+      assignments: {
+        include: { assignment: { include: { user: true, _count: { select: { excelFiles: true, imageRanges: true } } } } },
+      },
+    },
+  });
+  if (!e) throw notFound('Excel file not found');
+
+  const linked = e.assignments.map((l) => l.assignment);
+  const emptied = linked.filter((a) => a._count.excelFiles <= 1 && a._count.imageRanges === 0);
+  if (emptied.length) {
+    throw conflict(`This is the only work assigned to ${emptied.map((a) => `${fullName(a.user)} (${a.user.employeeId})`).join(', ')}. Edit or delete that assignment first.`);
+  }
+  if (linked.length && req.query.force !== 'true') {
+    throw conflict(`This Excel sheet is assigned to ${linked.length} assignment(s). Confirm to remove it from them as well.`);
+  }
+
+  await prisma.excelFile.delete({ where: { id: excelId } }); // assignment links are removed with it
+  try { await removePath(await assertFileExists(e.storagePath)); } catch { /* file already gone */ }
+  await prisma.zipUpload.update({ where: { id }, data: { totalFiles: { decrement: 1 } } }).catch(() => {});
+
+  await logActivity({
+    action: 'EXCEL_REMOVED', entityType: 'ZipUpload', entityId: id, actor: req.user,
+    details: { file: e.relativePath, removedFromAssignments: linked.length },
+  });
+  res.json({ ok: true, removedFromAssignments: linked.length });
 });
 
 /**
