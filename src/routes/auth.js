@@ -35,7 +35,7 @@ async function finishLogin(req, res, user, password) {
 }
 
 const adminLoginSchema = z.object({
-  username: z.string().trim().min(1, 'Username is required'),
+  username: z.string().transform((v) => v.replace(/\s+/g, '')).pipe(z.string().min(1, 'Username is required')), // no spaces
   password: z.string().min(1, 'Password is required'),
 });
 
@@ -49,7 +49,7 @@ router.post('/admin/login', loginLimiter, async (req, res) => {
 });
 
 const userLoginSchema = z.object({
-  identifier: z.string().trim().min(1, 'Employee ID or email is required'),
+  identifier: z.string().transform((v) => v.replace(/\s+/g, '')).pipe(z.string().min(1, 'Employee ID or email is required')), // no spaces
   password: z.string().min(1, 'Password is required'),
 });
 
